@@ -18,7 +18,7 @@ export async function onRequest(context) {
   const MAX_DB_SIZE = 1000; // [优化2] 数据库最大保留 3000 张图 (防止内存溢出)
   
   // [优化3] 兜底图片 (当所有数据源都挂了时显示这张，建议换成你自己的稳定图)
-  const FALLBACK_IMAGE = "https://xiaoiwg.dongfeng-nissan.com.cn/aicc-workbench/res/download/default/temp/images/20251215/0c01258fc30202b5a69ae09d4f7af81d341f9315.jpg"; 
+  const FALLBACK_IMAGE = "https://aisearch.cdn.bcebos.com/fileManager/u__qckLoPd5Gk6Se9-HLmPTtZYAkS1VFhLt9vquAsTw/1765812350955YfFCSD.jpg"; 
   // ----------------------------------------
 
   try {
