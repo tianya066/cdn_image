@@ -1,86 +1,102 @@
 export async function onRequest(context) {
-  // 数据源
+  const { env } = context;
+
+  // ----------------配置区域----------------
   const SOURCE_URL = "https://pixiv-api.wrnm.dpdns.org/pe_pixiv.json";
   const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36";
   
-  // -------------------------------------------------------
-  // 修改点 A: 引入 Cloudflare 缓存 API
-  // -------------------------------------------------------
-  const cache = caches.default;
-  const request = context.request;
-
-  // 1. 尝试从缓存中读取
-  // 这里的 request 包含 URL，如果 URL 相同，就会命中缓存
-  const cachedResponse = await cache.match(request);
-  if (cachedResponse) {
-    console.log("Hit cache");
-    return cachedResponse;
-  }
+  // KV 中的键名 (相当于你的文件名)
+  const DB_KEY = "pixiv_archive_db"; 
+  // 更新间隔 (毫秒) - 这里设为 1 小时
+  const UPDATE_INTERVAL = 60 * 60 * 1000; 
+  // ----------------------------------------
 
   try {
-    // -------------------------------------------------------
-    // 修改点 B: 移除时间戳，允许 JSON 源也被 Cloudflare 短暂缓存
-    // -------------------------------------------------------
-    // 如果你希望源列表也缓存一点时间（减少对源站 JSON 的请求），去掉 ?t=...
-    // 如果你坚持要最新的列表，可以保留 ?t=...，但这不影响最终图片的 1 小时缓存
-    const jsonUrl = SOURCE_URL; 
+    // 1. 如果没有绑定 KV，报错提示
+    if (!env.KV_CACHE) {
+      return new Response("Error: KV_CACHE binding not found. Please configure KV in Cloudflare dashboard.", { status: 500 });
+    }
 
-    const jsonResponse = await fetch(jsonUrl, {
-      headers: { "User-Agent": USER_AGENT },
-      cf: {
-        // 修改点 C: 允许 Cloudflare 缓存这个 JSON 请求 1 小时 (3600秒)
-        // 这样不用每次都去源站拉 JSON 列表
-        cacheTtl: 3600,
-        cacheEverything: true
+    // 2. 从 KV 读取当前的“数据库”
+    // 结构设计: { lastUpdated: 1680000000, urls: ["url1", "url2", ...] }
+    let db = await env.KV_CACHE.get(DB_KEY, { type: "json" });
+
+    // 如果是第一次运行，初始化数据库
+    if (!db) {
+      db = { lastUpdated: 0, urls: [] };
+    }
+
+    const now = Date.now();
+    let isDataUpdated = false;
+
+    // 3. 检查是否需要更新 (数据库为空 OR 距离上次更新超过1小时)
+    if (db.urls.length === 0 || (now - db.lastUpdated > UPDATE_INTERVAL)) {
+      console.log("Triggering update: Fetching new images...");
+      
+      try {
+        const sourceResp = await fetch(SOURCE_URL, {
+          headers: { "User-Agent": USER_AGENT }
+        });
+
+        if (sourceResp.ok) {
+          const data = await sourceResp.json();
+          if (data.data && data.data.length > 0) {
+            
+            // 提取新图片的 URL
+            const newUrls = data.data.map(item => item.urls.regular);
+
+            // --- 核心逻辑：去重并追加 ---
+            // 使用 Set 自动去除重复图片，防止同一个图片存两遍
+            const uniqueSet = new Set([...db.urls, ...newUrls]);
+            db.urls = Array.from(uniqueSet);
+            
+            // 更新时间戳
+            db.lastUpdated = now;
+            isDataUpdated = true;
+
+            console.log(`Updated! Total images in library: ${db.urls.length}`);
+          }
+        }
+      } catch (e) {
+        console.error("Failed to fetch source, using existing cache.", e);
+        // 如果抓取失败，什么都不做，继续用旧数据，保证服务不挂
       }
-    });
+    }
 
-    if (!jsonResponse.ok) return new Response("Error fetching source", { status: 502 });
-    
-    const data = await jsonResponse.json();
-    if (!data.data || data.data.length === 0) return new Response("No data", { status: 404 });
+    // 4. 如果数据有更新，将新数据库写回 KV
+    // 使用 waitUntil 让写入操作在后台进行，不阻塞用户看到图片的速度
+    if (isDataUpdated) {
+      context.waitUntil(
+        env.KV_CACHE.put(DB_KEY, JSON.stringify(db))
+      );
+    }
 
-    // 随机逻辑
-    const item = data.data[Math.floor(Math.random() * data.data.length)];
-    const imageUrl = item.urls.regular;
+    // 5. 此时 db.urls 里可能有几百上千张图，随机取一张
+    if (db.urls.length === 0) {
+      return new Response("No images in database yet.", { status: 404 });
+    }
 
-    // 代理图片
-    const imageResponse = await fetch(imageUrl, {
+    const randomUrl = db.urls[Math.floor(Math.random() * db.urls.length)];
+
+    // 6. 代理图片请求 (标准流程)
+    const imageResponse = await fetch(randomUrl, {
       headers: {
         "Referer": "https://www.pixiv.net/",
         "User-Agent": USER_AGENT
       }
     });
 
-    // -------------------------------------------------------
-    // 修改点 D: 设置允许缓存的响应头
-    // -------------------------------------------------------
     const newHeaders = new Headers(imageResponse.headers);
     newHeaders.set("Access-Control-Allow-Origin", "*");
-    
-    // 核心修改：设置为缓存 1 小时 (3600秒)
-    // s-maxage 控制 CDN 缓存，max-age 控制浏览器缓存
-    newHeaders.set("Cache-Control", "public, max-age=3600, s-maxage=3600");
-    
-    // 移除之前的禁止缓存头
-    newHeaders.delete("Pragma");
-    newHeaders.delete("Expires");
+    // 浏览器缓存 5 分钟
+    newHeaders.set("Cache-Control", "public, max-age=300"); 
 
-    // 重构 Response 对象
-    const response = new Response(imageResponse.body, {
+    return new Response(imageResponse.body, {
       status: imageResponse.status,
       headers: newHeaders
     });
 
-    // -------------------------------------------------------
-    // 修改点 E: 将结果写入 Cloudflare 缓存
-    // context.waitUntil 确保请求结束后缓存操作继续完成
-    // -------------------------------------------------------
-    context.waitUntil(cache.put(request, response.clone()));
-
-    return response;
-
   } catch (err) {
-    return new Response(err.message, { status: 500 });
+    return new Response(`Server Error: ${err.message}`, { status: 500 });
   }
 }
