@@ -6,7 +6,7 @@ export async function onRequest(context) {
   const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36";
   const DB_KEY = "pixiv_archive_db"; 
   const UPDATE_INTERVAL = 60 * 60 * 1000; // KV数据库更新间隔 (1小时进货一次)
-  const EDGE_CACHE_TTL = 60 * 60 * 24 * 7; // Cloudflare边缘缓存图片内容时长 (7天)
+  const EDGE_CACHE_TTL = 60 * 60 * 24 * 365; // Cloudflare边缘缓存图片内容时长 (7天)
   const BROWSER_CACHE_TTL = 3600; // [修改点] 浏览器缓存时长 (1小时)
   // ----------------------------------------
 
